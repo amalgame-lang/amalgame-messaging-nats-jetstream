@@ -1,0 +1,125 @@
+// Stdlib test: Amalgame.Messaging.NATS.JetStream — end-to-end
+// against a real NATS server with `-js` enabled. Skipped locally
+// when nothing's listening on 127.0.0.1:4222 (run_tests.sh probes
+// the port first). CI launches nats:2-alpine -js as a service
+// container.
+//
+// Flow exercised:
+//   Open → StreamCreate(test_subj.>) → Publish ×3 → ConsumerCreate
+//   → ConsumerPull → MessageData lookup → AckAll → StreamDelete →
+//   Close.
+
+namespace Tests
+
+import Amalgame.Messaging.NATS.JetStream
+
+public class Program {
+    public static void Main(string[] args) {
+
+        let host: string = "127.0.0.1"
+        let port: int    = 4222
+
+        let js = JetStream.Open(host, port)
+        if (JetStream.IsOpen(js)) {
+            Console.WriteLine("[PASS] open")
+        } else {
+            Console.WriteLine("[FAIL] open: " + JetStream.LastError(js))
+            return
+        }
+
+        // ── 1. StreamCreate ───────────────────────────────────
+        // Subjects scoped under amctest.> so we can wipe + recreate
+        // freely without colliding with anything else on the server.
+        let streamName: string = "AMCTEST_JS"
+        let subjects = new List<string>()
+        subjects.Add("amctest.>")
+
+        // Best-effort cleanup of previous run leftovers.
+        JetStream.StreamDelete(js, streamName)
+
+        let ok1: bool = JetStream.StreamCreate(js, streamName, subjects)
+        if (ok1) {
+            Console.WriteLine("[PASS] StreamCreate AMCTEST_JS")
+        } else {
+            Console.WriteLine("[FAIL] StreamCreate: " + JetStream.LastError(js))
+            JetStream.Close(js)
+            return
+        }
+
+        // ── 2. StreamInfo returns non-empty JSON ──────────────
+        let info: string = JetStream.StreamInfo(js, streamName)
+        if (String_Length(info) > 0 && String_Contains(info, "AMCTEST_JS")) {
+            Console.WriteLine("[PASS] StreamInfo mentions stream name")
+        } else {
+            Console.WriteLine("[FAIL] StreamInfo: " + info)
+        }
+
+        // ── 3. Publish three messages, observe sequence ───────
+        JetStream.Publish(js, "amctest.alpha", "msg-1")
+        let seq1: int = JetStream.LastSeq(js)
+        JetStream.Publish(js, "amctest.alpha", "msg-2")
+        let seq2: int = JetStream.LastSeq(js)
+        JetStream.Publish(js, "amctest.beta",  "msg-3")
+        let seq3: int = JetStream.LastSeq(js)
+
+        if (seq1 > 0 && seq2 == seq1 + 1 && seq3 == seq2 + 1) {
+            Console.WriteLine("[PASS] Publish sequences monotonic")
+        } else {
+            Console.WriteLine("[FAIL] seq1="
+                + String_FromInt(seq1) + " seq2="
+                + String_FromInt(seq2) + " seq3="
+                + String_FromInt(seq3))
+        }
+
+        // ── 4. ConsumerCreate (durable pull) ──────────────────
+        let consumerName: string = "AMCTEST_DUR"
+        let ok2: bool = JetStream.ConsumerCreate(js, streamName, consumerName)
+        if (ok2) {
+            Console.WriteLine("[PASS] ConsumerCreate")
+        } else {
+            Console.WriteLine("[FAIL] ConsumerCreate: " + JetStream.LastError(js))
+            JetStream.StreamDelete(js, streamName)
+            JetStream.Close(js)
+            return
+        }
+
+        // ── 5. ConsumerPull — pull batch of 3, expect 3 ───────
+        let n: int = JetStream.ConsumerPull(js, streamName, consumerName, 3, 2000)
+        if (n == 3) {
+            Console.WriteLine("[PASS] ConsumerPull returned 3 messages")
+        } else {
+            Console.WriteLine("[FAIL] ConsumerPull got " + String_FromInt(n))
+        }
+
+        // ── 6. Message payloads match what we published ───────
+        let d0: string = JetStream.MessageData(js, 0)
+        let d1: string = JetStream.MessageData(js, 1)
+        let d2: string = JetStream.MessageData(js, 2)
+        if (d0 == "msg-1" && d1 == "msg-2" && d2 == "msg-3") {
+            Console.WriteLine("[PASS] payloads in order: msg-1, msg-2, msg-3")
+        } else {
+            Console.WriteLine("[FAIL] payloads: ["
+                + d0 + "][" + d1 + "][" + d2 + "]")
+        }
+
+        // ── 7. AckAll + redeliver-via-pull returns 0 ──────────
+        JetStream.AckAll(js)
+        let nAgain: int = JetStream.ConsumerPull(js, streamName, consumerName, 3, 500)
+        if (nAgain == 0) {
+            Console.WriteLine("[PASS] after AckAll no redelivery")
+        } else {
+            Console.WriteLine("[FAIL] redelivered " + String_FromInt(nAgain))
+        }
+
+        // ── 8. StreamDelete cleans up ─────────────────────────
+        let okDel: bool = JetStream.StreamDelete(js, streamName)
+        if (okDel) {
+            Console.WriteLine("[PASS] StreamDelete")
+        } else {
+            Console.WriteLine("[FAIL] StreamDelete: " + JetStream.LastError(js))
+        }
+
+        JetStream.Close(js)
+        Console.WriteLine("[PASS] close")
+    }
+}

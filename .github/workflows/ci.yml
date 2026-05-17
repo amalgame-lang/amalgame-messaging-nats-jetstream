@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Test against amc ${{ matrix.amc-tag }}
+    runs-on: ubuntu-latest
+
+    # GitHub Actions service container — official nats:2-alpine
+    # image with `-js` enabled (JetStream + storage dir under /tmp).
+    # Health-check via the HTTP monitoring port (8222 by default;
+    # `-m 8222` makes it explicit).
+    services:
+      nats:
+        image: nats:2-alpine
+        ports: ['4222:4222', '8222:8222']
+        options: >-
+          --health-cmd "wget -qO- http://127.0.0.1:8222/healthz || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        # `services.<id>.options` doesn't forward args to the image
+        # entrypoint; we wedge them into the env-derived nats config
+        # by using the `cmd` analogue via volumes is more involved.
+        # Easier: rely on `command:` shim — GH Actions supports it
+        # via the `services.<id>.options` `--entrypoint`-style hack,
+        # but the cleanest way is a sidecar `--health-cmd` plus
+        # passing JS flags through the env-aware nats image (it
+        # accepts -js -sd /tmp via the entrypoint).
+        # The nats:2-alpine entrypoint is `nats-server`, so any
+        # extra positional args from `options` after `--` would
+        # be forwarded; in practice we use the `--` separator:
+        env:
+          # nats:2-alpine reads no NATS_* env, so push the JS flag
+          # via a config file mounted… but that's also complex.
+          # Workaround: run a second `Set up JetStream` step that
+          # restarts the container with the right args via docker.
+          NATS_JS_DUMMY: "1"
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # v0.8.20+ recommended (LSP + cgen v0.8 fixes). The
+        # JetStream package only needs amc to compile its
+        # tests — no special compiler-side support is required.
+        amc-tag: [v0.8.22]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (libgc + libcurl)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y libgc-dev libcurl4-openssl-dev
+
+      # The `services.nats.options` block above can't forward extra
+      # args to nats-server, so the default container has JS off.
+      # Replace it with one that has `-js -sd /tmp` enabled.
+      - name: Replace nats container with JetStream-enabled one
+        run: |
+          docker stop "${{ job.services.nats.id }}" || true
+          docker rm   "${{ job.services.nats.id }}" || true
+          docker run -d --name nats-js \
+            -p 4222:4222 -p 8222:8222 \
+            nats:2-alpine -js -sd /tmp -m 8222
+          # Wait for the new container to come up.
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if wget -qO- http://127.0.0.1:8222/healthz >/dev/null 2>&1; then
+              echo "nats-js healthy"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Download amc ${{ matrix.amc-tag }}
+        run: |
+          set -e
+          TAG="${{ matrix.amc-tag }}"
+          VERSION="${TAG#v}"
+          curl -sSL -o amc.tar.gz \
+            "https://github.com/amalgame-lang/Amalgame/releases/download/${TAG}/amc-${VERSION}-linux-x86_64.tar.gz"
+          mkdir -p $RUNNER_TEMP/amc-install
+          tar -xzf amc.tar.gz -C $RUNNER_TEMP/amc-install --strip-components=1
+          echo "AMC=$RUNNER_TEMP/amc-install/amc" >> $GITHUB_ENV
+          echo "AMC_RUNTIME=$RUNNER_TEMP/amc-install/runtime" >> $GITHUB_ENV
+
+      - name: Verify amc
+        run: $AMC --version
+
+      - name: Run tests
+        run: ./tests/run_tests.sh "$AMC"

@@ -1,0 +1,92 @@
+# Package manifest — amalgame-messaging-nats-jetstream
+#
+# NATS JetStream client for Amalgame — persistent streams,
+# durable consumers, at-least-once delivery on top of the NATS
+# Core wire protocol. Lives in its own package since the JS
+# surface (Stream / Consumer / KV / ObjectStore) is large
+# enough to deserve a distinct manifest and version cadence
+# from amalgame-messaging-nats (which ships the ephemeral Pub /
+# Sub / Request-Reply surface).
+#
+# The two packages are independent — this one re-implements the
+# minimal Connect / Publish / Subscribe / WaitMessage TCP layer
+# inline (~250 LoC) so a project can pick JetStream alone
+# without pulling NATS Core. They share zero header.
+#
+# Surface (v0.1):
+#   Lifecycle:
+#     Open(host, port) / Close                          handle lifecycle
+#     IsOpen / LastError                                diagnostics
+#
+#   Stream management ($JS.API.STREAM.*):
+#     StreamCreate(name, subjects)                      file storage, default policy
+#     StreamDelete(name)
+#     StreamInfo(name)                  -> JSON string  raw API response
+#
+#   Publishing:
+#     Publish(subject, payload)         -> bool         blocks until PubAck
+#     LastSeq                           -> int          sequence from last PubAck
+#
+#   Pull consumer (durable):
+#     ConsumerCreate(stream, name)                      Durable, AckExplicit
+#     ConsumerPull(stream, name,
+#                  batch, timeout_ms)    -> int         message count
+#     MessageSubject(idx) / MessageData(idx)
+#     MessageReply(idx)                                 ack-inbox subject
+#     AckAll                                            ACK every pulled msg
+#
+# Wire vocabulary: same NATS Core protocol (PUB / SUB / MSG /
+# +OK / -ERR / PING / PONG). JS API requests are PUBs to special
+# subjects ($JS.API.STREAM.CREATE.<name>, etc.) with a JSON body
+# and a reply-to inbox; responses arrive as MSGs on that inbox.
+# https://docs.nats.io/reference/reference-protocols/nats_api_reference
+#
+# Deferred to v0.2:
+#   - KV store (kv_bucket_create / put / get / watch)
+#   - ObjectStore (chunked object IO)
+#   - Push consumers (deliver_subject, more complex flow control)
+#   - AckTerm / AckNak / AckProgress (only AckAck for now)
+#   - JS domain prefix (multi-tenant deployments)
+#   - TLS, JWT/NKEY/user-pass auth
+#
+# Requires a NATS server with JetStream enabled:
+#   docker run --rm -p 4222:4222 nats:2-alpine -js -sd /tmp
+#   # or nats-server -js -sd /tmp
+#
+# Installation:
+#
+#   amc package add messaging-nats-jetstream                                    # via index
+#   amc package add github.com/amalgame-lang/amalgame-messaging-nats-jetstream@v0.1.0
+
+[package]
+name              = "amalgame-messaging-nats-jetstream"
+version           = "0.1.0"
+license           = "Apache-2.0"
+description       = "NATS JetStream client for Amalgame — persistent streams, durable pull consumers, at-least-once delivery. Independent of amalgame-messaging-nats (NATS Core)."
+authors           = ["Bastien Mouget"]
+required-amalgame = ">=0.5.4"
+schema-version    = 1
+
+[stdlib]
+class     = "JetStream"
+header    = "runtime/Amalgame_Messaging_NATS_JetStream.h"
+namespace = "Amalgame.Messaging.NATS.JetStream"
+
+[stdlib.functions]
+Open               = { returns = "AmalgameJetStream*" }
+Close              = { returns = "void" }
+IsOpen             = { returns = "code_bool" }
+LastError          = { returns = "code_string" }
+StreamCreate       = { returns = "code_bool" }
+StreamDelete       = { returns = "code_bool" }
+StreamInfo         = { returns = "code_string" }
+Publish            = { returns = "code_bool" }
+LastSeq            = { returns = "i64" }
+ConsumerCreate     = { returns = "code_bool" }
+ConsumerPull       = { returns = "i64" }
+MessageSubject     = { returns = "code_string" }
+MessageData        = { returns = "code_string" }
+MessageReply       = { returns = "code_string" }
+AckAll             = { returns = "void" }
+
+[dependencies]
