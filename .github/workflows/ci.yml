@@ -26,23 +26,10 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-        # `services.<id>.options` doesn't forward args to the image
-        # entrypoint; we wedge them into the env-derived nats config
-        # by using the `cmd` analogue via volumes is more involved.
-        # Easier: rely on `command:` shim — GH Actions supports it
-        # via the `services.<id>.options` `--entrypoint`-style hack,
-        # but the cleanest way is a sidecar `--health-cmd` plus
-        # passing JS flags through the env-aware nats image (it
-        # accepts -js -sd /tmp via the entrypoint).
-        # The nats:2-alpine entrypoint is `nats-server`, so any
-        # extra positional args from `options` after `--` would
-        # be forwarded; in practice we use the `--` separator:
-        env:
-          # nats:2-alpine reads no NATS_* env, so push the JS flag
-          # via a config file mounted… but that's also complex.
-          # Workaround: run a second `Set up JetStream` step that
-          # restarts the container with the right args via docker.
-          NATS_JS_DUMMY: "1"
+        # `services.<id>.options` can't forward positional args to
+        # the image entrypoint, so the default container starts
+        # nats-server WITHOUT `-js`. The `Replace nats container`
+        # step below tears it down and restarts with JetStream on.
 
     strategy:
       fail-fast: false
@@ -87,9 +74,13 @@ jobs:
           curl -sSL -o amc.tar.gz \
             "https://github.com/amalgame-lang/Amalgame/releases/download/${TAG}/amc-${VERSION}-linux-x86_64.tar.gz"
           mkdir -p $RUNNER_TEMP/amc-install
+          # v0.8.22+ tarball layout:
+          #   amc-X.Y.Z-linux-x86_64/bin/amc
+          #   amc-X.Y.Z-linux-x86_64/share/amalgame/runtime/*.h
+          # --strip-components=1 peels the version-named root dir.
           tar -xzf amc.tar.gz -C $RUNNER_TEMP/amc-install --strip-components=1
-          echo "AMC=$RUNNER_TEMP/amc-install/amc" >> $GITHUB_ENV
-          echo "AMC_RUNTIME=$RUNNER_TEMP/amc-install/runtime" >> $GITHUB_ENV
+          echo "AMC=$RUNNER_TEMP/amc-install/bin/amc" >> $GITHUB_ENV
+          echo "AMC_RUNTIME=$RUNNER_TEMP/amc-install/share/amalgame/runtime" >> $GITHUB_ENV
 
       - name: Verify amc
         run: $AMC --version
